@@ -157,7 +157,7 @@ app.get('/dashboard', requireLogin, (req, res) => {
 });
 
 app.get('/api/dashboard', requireLogin, (req, res) => {
-    const userPermissions = permissions.filter(p => p.email === req.session.email);
+    const userPermissions = permissions.filter(p => p.email.toLowerCase() === req.session.email.toLowerCase());
     const userDocs = documents.filter(doc => userPermissions.some(p => p.documentId === doc.id));
     res.json(userDocs);
 });
