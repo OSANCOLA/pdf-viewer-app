@@ -58,6 +58,8 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Auth Middleware ---
 const requireLogin = (req, res, next) => {
+    console.log('requireLogin: Session:', req.session);
+    console.log('requireLogin: Session Email:', req.session ? req.session.email : 'N/A');
     if (req.session && req.session.email) {
         return next();
     } else {
@@ -159,8 +161,16 @@ app.get('/dashboard', requireLogin, (req, res) => {
 app.get('/api/dashboard', requireLogin, (req, res) => {
     try {
         const userEmail = req.session.email.toLowerCase();
+        console.log('Dashboard API: User Email:', userEmail);
+        console.log('Dashboard API: All Documents:', documents);
+        console.log('Dashboard API: All Permissions:', permissions);
+
         const userPermissions = permissions.filter(p => p.email && p.email.toLowerCase() === userEmail);
+        console.log('Dashboard API: User Permissions:', userPermissions);
+
         const userDocs = documents.filter(doc => userPermissions.some(p => p.documentId === doc.id));
+        console.log('Dashboard API: Documents for User:', userDocs);
+
         res.json(userDocs);
     } catch (error) {
         console.error('Error in /api/dashboard:', error);
