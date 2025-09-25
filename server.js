@@ -48,12 +48,12 @@ const port = process.env.PORT || 3000;
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(session({
-    secret: 'a-much-better-secret-key-for-prod',
+    secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
     resave: false,
     saveUninitialized: true,
     cookie: { secure: process.env.NODE_ENV === 'production' } // Use secure cookies in prod
 }));
-app.use(express.static('views'));
+app.use(express.static(path.join(__dirname, 'views')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Auth Middleware ---
