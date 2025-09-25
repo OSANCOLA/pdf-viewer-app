@@ -1,65 +1,56 @@
 const express = require('express');
 const session = require('express-session');
+const FileStore = require('session-file-store')(session);
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const sgMail = require('@sendgrid/mail');
+const { MongoClient } = require('mongodb');
 
-// --- Database Setup ---
-const DB_PATH = path.join(__dirname, 'database.json');
-let documents = [];
-let permissions = [];
-let loginTokens = {}; // Should be global for this single-instance approach
-
-function loadDatabase() {
-    try {
-        if (fs.existsSync(DB_PATH)) {
-            const data = fs.readFileSync(DB_PATH, 'utf8');
-            const db = JSON.parse(data);
-            documents = db.documents || [];
-            permissions = db.permissions || [];
-            console.log('Database loaded successfully.');
-        }
-    } catch (error) {
-        console.error('Error loading database:', error);
-        documents = [];
-        permissions = [];
-    }
-}
-
-function saveDatabase() {
-    try {
-        const db = { documents, permissions };
-        fs.writeFileSync(DB_PATH, JSON.stringify(db, null, 2), 'utf8');
-        console.log('Database saved successfully.');
-    } catch (error) {
-        console.error('Error saving database:', error);
-    }
-}
-
-// --- SendGrid Setup ---
+// --- Config ---
+const port = process.env.PORT || 3000;
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
+// IMPORTANT: Store this as an environment variable in Render
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://oscarcornejoeo_db_user:OYMnp4ZBmVao3pEg@cluster0.23zn79g.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+const DB_NAME = 'pdf-viewer-db';
+
+// --- Database Connection ---
+let db, documentsCollection, permissionsCollection, loginTokensCollection;
+
+async function connectDB() {
+    try {
+        const client = new MongoClient(MONGODB_URI);
+        await client.connect();
+        db = client.db(DB_NAME);
+        documentsCollection = db.collection('documents');
+        permissionsCollection = db.collection('permissions');
+        loginTokensCollection = db.collection('loginTokens');
+        console.log('Successfully connected to MongoDB Atlas.');
+    } catch (error) {
+        console.error('Failed to connect to MongoDB Atlas.', error);
+        process.exit(1); // Exit if we can't connect to the DB
+    }
+}
+
 const app = express();
-const port = process.env.PORT || 3000;
 
 // --- Middleware ---
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(session({
+    store: new FileStore({ logFn: function() {} }), // No logging
     secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
     resave: false,
     saveUninitialized: true,
-    cookie: { secure: process.env.NODE_ENV === 'production' } // Use secure cookies in prod
+    cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 1000 * 60 * 60 * 24 } // 24 hour session
 }));
 app.use(express.static(path.join(__dirname, 'views')));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Auth Middleware ---
 const requireLogin = (req, res, next) => {
-    console.log('requireLogin: Session:', req.session);
-    console.log('requireLogin: Session Email:', req.session ? req.session.email : 'N/A');
     if (req.session && req.session.email) {
         return next();
     } else {
@@ -68,12 +59,19 @@ const requireLogin = (req, res, next) => {
 };
 
 // --- Admin Routes ---
-app.get('/permissions', (req, res) => {
+app.get('/permissions', requireLogin, (req, res) => {
     res.sendFile(path.join(__dirname, 'views', 'permissions.html'));
 });
 
-app.get('/api/data', (req, res) => {
-    res.json({ documents, permissions });
+app.get('/api/data', requireLogin, async (req, res) => {
+    try {
+        const documents = await documentsCollection.find().toArray();
+        const permissions = await permissionsCollection.find().toArray();
+        res.json({ documents, permissions });
+    } catch (error) {
+        console.error('Error fetching API data:', error);
+        res.status(500).json({ error: 'Failed to fetch data' });
+    }
 });
 
 const storage = multer.diskStorage({
@@ -89,25 +87,40 @@ const storage = multer.diskStorage({
             originalName: file.originalname,
             storedName: storedName
         };
-        documents.push(docInfo);
-        saveDatabase();
+        // The database insertion will be handled in the route handler
+        req.docInfo = docInfo;
         cb(null, storedName);
     }
 });
 const upload = multer({ storage: storage });
 
-app.post('/upload', upload.single('pdfFile'), (req, res) => {
-    res.redirect('/permissions.html');
+app.post('/upload', requireLogin, upload.single('pdfFile'), async (req, res) => {
+    try {
+        if (req.docInfo) {
+            await documentsCollection.insertOne(req.docInfo);
+        }
+        res.redirect('/permissions.html');
+    } catch (error) {
+        console.error('Error uploading file:', error);
+        res.status(500).send('Error saving document information.');
+    }
 });
 
-app.post('/grant-access', (req, res) => {
-    const { email, documentId } = req.body;
-    if (email && documentId && !permissions.some(p => p.email === email && p.documentId === documentId)) {
-        permissions.push({ email, documentId });
-        saveDatabase();
-        console.log(`Access granted for ${email} to document ${documentId}`);
+app.post('/grant-access', requireLogin, async (req, res) => {
+    try {
+        const { email, documentId } = req.body;
+        if (email && documentId) {
+            const existingPermission = await permissionsCollection.findOne({ email, documentId });
+            if (!existingPermission) {
+                await permissionsCollection.insertOne({ email, documentId });
+                console.log(`Access granted for ${email} to document ${documentId}`);
+            }
+        }
+        res.redirect('/permissions.html');
+    } catch (error) {
+        console.error('Error granting access:', error);
+        res.status(500).send('Error granting access.');
     }
-    res.redirect('/permissions.html');
 });
 
 // --- Auth Routes ---
@@ -116,16 +129,20 @@ app.post('/request-login', async (req, res) => {
     if (!email) return res.status(400).send('Email is required.');
 
     const token = Math.floor(100000 + Math.random() * 900000).toString();
-    loginTokens[email] = { token, expires: Date.now() + 300000 }; // 5-min expiry
-
-    const msg = {
-        to: email,
-        from: 'oscarcornejo.eo@gmail.com',
-        subject: 'Your PDF Viewer Login Code',
-        text: `Your login code is: ${token}`,
-    };
+    const newToken = { email, token, expires: Date.now() + 300000 }; // 5-min expiry
 
     try {
+        // Remove old tokens for the same email and insert the new one
+        await loginTokensCollection.deleteMany({ email });
+        await loginTokensCollection.insertOne(newToken);
+
+        const msg = {
+            to: email,
+            from: 'oscarcornejo.eo@gmail.com', // This should ideally be a verified sender in SendGrid
+            subject: 'Your PDF Viewer Login Code',
+            text: `Your login code is: ${token}`,
+        };
+
         await sgMail.send(msg);
         console.log('Login email sent to ' + email);
         res.redirect(`/verify.html?email=${encodeURIComponent(email)}`);
@@ -135,17 +152,25 @@ app.post('/request-login', async (req, res) => {
     }
 });
 
-app.post('/verify', (req, res) => {
-    const { email, token } = req.body;
-    const storedToken = loginTokens[email];
+app.post('/verify', async (req, res) => {
+    try {
+        const { email, token } = req.body;
+        const storedToken = await loginTokensCollection.findOne({ email, token });
 
-    if (storedToken && storedToken.token === token && storedToken.expires > Date.now()) {
-        req.session.email = email;
-        delete loginTokens[email];
-        console.log('User verified:', email);
-        res.redirect('/dashboard.html');
-    } else {
-        res.status(400).send('Invalid or expired token. <a href="/login.html">Try again</a>');
+        if (storedToken && storedToken.expires > Date.now()) {
+            req.session.email = email;
+            await loginTokensCollection.deleteOne({ _id: storedToken._id });
+            console.log('User verified:', email);
+            res.redirect('/dashboard.html');
+        } else {
+            if (storedToken) { // Token expired
+                await loginTokensCollection.deleteOne({ _id: storedToken._id });
+            }
+            res.status(400).send('Invalid or expired token. <a href="/login.html">Try again</a>');
+        }
+    } catch (error) {
+        console.error('Error verifying token:', error);
+        res.status(500).send('Error during verification.');
     }
 });
 
@@ -158,19 +183,12 @@ app.get('/dashboard', requireLogin, (req, res) => {
     res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
 });
 
-app.get('/api/dashboard', requireLogin, (req, res) => {
+app.get('/api/dashboard', requireLogin, async (req, res) => {
     try {
         const userEmail = req.session.email.toLowerCase();
-        console.log('Dashboard API: User Email:', userEmail);
-        console.log('Dashboard API: All Documents:', documents);
-        console.log('Dashboard API: All Permissions:', permissions);
-
-        const userPermissions = permissions.filter(p => p.email && p.email.toLowerCase() === userEmail);
-        console.log('Dashboard API: User Permissions:', userPermissions);
-
-        const userDocs = documents.filter(doc => userPermissions.some(p => p.documentId === doc.id));
-        console.log('Dashboard API: Documents for User:', userDocs);
-
+        const userPermissions = await permissionsCollection.find({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') } }).toArray();
+        const documentIds = userPermissions.map(p => p.documentId);
+        const userDocs = await documentsCollection.find({ id: { $in: documentIds } }).toArray();
         res.json(userDocs);
     } catch (error) {
         console.error('Error in /api/dashboard:', error);
@@ -182,19 +200,26 @@ app.get('/viewer.html', requireLogin, (req, res) => {
     res.sendFile(path.join(__dirname, 'views', 'viewer.html'));
 });
 
-app.get('/pdf-data/:docId', requireLogin, (req, res) => {
-    const { docId } = req.params;
-    const hasPermission = permissions.some(p => p.email === req.session.email && p.documentId === docId);
-    if (!hasPermission) return res.status(403).send('Access Denied.');
+app.get('/pdf-data/:docId', requireLogin, async (req, res) => {
+    try {
+        const { docId } = req.params;
+        const userEmail = req.session.email;
 
-    const doc = documents.find(d => d.id === docId);
-    if (!doc) return res.status(404).send('Document not found.');
+        const hasPermission = await permissionsCollection.findOne({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') }, documentId: docId });
+        if (!hasPermission) return res.status(403).send('Access Denied.');
 
-    const pdfPath = path.join(__dirname, 'uploads', doc.storedName);
-    if (fs.existsSync(pdfPath)) {
-        res.sendFile(pdfPath);
-    } else {
-        res.status(404).send('Document file is missing.');
+        const doc = await documentsCollection.findOne({ id: docId });
+        if (!doc) return res.status(404).send('Document not found.');
+
+        const pdfPath = path.join(__dirname, 'uploads', doc.storedName);
+        if (fs.existsSync(pdfPath)) {
+            res.sendFile(pdfPath);
+        } else {
+            res.status(404).send('Document file is missing.');
+        }
+    } catch (error) {
+        console.error('Error fetching PDF data:', error);
+        res.status(500).send('Error fetching document.');
     }
 });
 
@@ -202,7 +227,11 @@ app.get('/pdf-data/:docId', requireLogin, (req, res) => {
 app.get('/', (req, res) => res.redirect('/login.html'));
 
 // --- Server ---
-app.listen(port, () => {
-    loadDatabase();
-    console.log(`Server running on port ${port}`);
-});
+async function startServer() {
+    await connectDB();
+    app.listen(port, () => {
+        console.log(`Server running on port ${port}`);
+    });
+}
+
+startServer();
