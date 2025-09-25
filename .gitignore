@@ -13,5 +13,8 @@ yarn-error.log*
 # Database file
 /database.json
 
+# Session files
+/sessions
+
 # Environment
 .env
