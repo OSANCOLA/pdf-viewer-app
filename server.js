@@ -157,9 +157,15 @@ app.get('/dashboard', requireLogin, (req, res) => {
 });
 
 app.get('/api/dashboard', requireLogin, (req, res) => {
-    const userPermissions = permissions.filter(p => p.email.toLowerCase() === req.session.email.toLowerCase());
-    const userDocs = documents.filter(doc => userPermissions.some(p => p.documentId === doc.id));
-    res.json(userDocs);
+    try {
+        const userEmail = req.session.email.toLowerCase();
+        const userPermissions = permissions.filter(p => p.email && p.email.toLowerCase() === userEmail);
+        const userDocs = documents.filter(doc => userPermissions.some(p => p.documentId === doc.id));
+        res.json(userDocs);
+    } catch (error) {
+        console.error('Error in /api/dashboard:', error);
+        res.status(500).json({ error: 'Failed to load documents' });
+    }
 });
 
 app.get('/viewer.html', requireLogin, (req, res) => {

@@ -10,5 +10,8 @@ yarn-error.log*
 # For now, we exclude it to keep the repo clean.
 /uploads
 
+# Database file
+/database.json
+
 # Environment
 .env
