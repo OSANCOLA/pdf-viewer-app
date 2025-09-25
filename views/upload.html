@@ -1,0 +1,26 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Upload PDF</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; }
+        .container { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; }
+        input[type="file"] { margin-bottom: 1rem; }
+        button { padding: 0.7rem; width: 100%; border: none; background-color: #28a745; color: white; border-radius: 4px; cursor: pointer; }
+        h2 { text-align: center; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h2>Upload PDF</h2>
+        <p>Only the admin should see this page.</p>
+        <form action="/upload" method="POST" enctype="multipart/form-data">
+            <input type="file" name="pdfFile" accept=".pdf" required>
+            <button type="submit">Upload</button>
+        </form>
+    </div>
+</body>
+</html>

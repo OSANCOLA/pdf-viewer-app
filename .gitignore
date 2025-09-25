@@ -1,0 +1,14 @@
+# Dependencies
+/node_modules
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Uploads - We will handle this via Render's persistent disks if needed
+# For now, we exclude it to keep the repo clean.
+/uploads
+
+# Environment
+.env

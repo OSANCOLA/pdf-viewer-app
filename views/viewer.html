@@ -1,0 +1,110 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PDF Viewer</title>
+    <style>
+        body { font-family: sans-serif; background-color: #f0f2f5; margin: 0; }
+        #viewer-container { display: flex; flex-direction: column; align-items: center; }
+        #pdf-viewer { border: 1px solid black; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        #controls { margin: 1rem; background: white; padding: 1rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        button { padding: 0.5rem 1rem; border: none; background-color: #007bff; color: white; border-radius: 4px; cursor: pointer; margin: 0 0.5rem; }
+        #page-num { font-weight: bold; }
+        #header { background: white; padding: 1rem; width: 100%; box-shadow: 0 2px 5px rgba(0,0,0,0.1); text-align: right; }
+    </style>
+</head>
+<body oncontextmenu="return false;">
+
+    <div id="header">
+        <a href="/logout">Logout</a>
+    </div>
+
+    <div id="viewer-container">
+        <div id="controls">
+            <button id="prev">Previous</button>
+            <span>Page: <span id="page-num"></span> / <span id="page-count"></span></span>
+            <button id="next">Next</button>
+        </div>
+        <canvas id="pdf-viewer"></canvas>
+    </div>
+
+    <script type="module">
+        import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.min.mjs";
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.5.136/pdf.worker.min.mjs';
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const docId = urlParams.get('docId');
+        const viewerContainer = document.getElementById('viewer-container');
+
+        if (!docId) {
+            viewerContainer.innerHTML = '<h1>Error: No document specified.</h1>';
+        } else {
+            const url = `/pdf-data/${docId}`;
+            let pdfDoc = null,
+                pageNum = 1,
+                pageRendering = false,
+                pageNumPending = null;
+
+            const scale = 1.5,
+                  canvas = document.getElementById('pdf-viewer'),
+                  ctx = canvas.getContext('2d');
+
+            function renderPage(num) {
+                pageRendering = true;
+                pdfDoc.getPage(num).then((page) => {
+                    const viewport = page.getViewport({ scale: scale });
+                    canvas.height = viewport.height;
+                    canvas.width = viewport.width;
+
+                    const renderContext = {
+                        canvasContext: ctx,
+                        viewport: viewport
+                    };
+                    const renderTask = page.render(renderContext);
+
+                    renderTask.promise.then(() => {
+                        pageRendering = false;
+                        if (pageNumPending !== null) {
+                            renderPage(pageNumPending);
+                            pageNumPending = null;
+                        }
+                    });
+                });
+                document.getElementById('page-num').textContent = num;
+            }
+
+            function queueRenderPage(num) {
+                if (pageRendering) {
+                    pageNumPending = num;
+                } else {
+                    renderPage(num);
+                }
+            }
+
+            document.getElementById('prev').addEventListener('click', () => {
+                if (pageNum <= 1) return;
+                pageNum--;
+                queueRenderPage(pageNum);
+            });
+
+            document.getElementById('next').addEventListener('click', () => {
+                if (pageNum >= pdfDoc.numPages) return;
+                pageNum++;
+                queueRenderPage(pageNum);
+            });
+
+            pdfjsLib.getDocument(url).promise.then((doc) => {
+                pdfDoc = doc;
+                document.getElementById('page-count').textContent = pdfDoc.numPages;
+                renderPage(pageNum);
+            }).catch(err => {
+                console.error('Error loading PDF:', err);
+                viewerContainer.innerHTML = '<p>Error: Could not load PDF. You may not have permission or the document does not exist.</p>';
+            });
+        }
+    </script>
+</body>
+</html>

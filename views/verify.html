@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Token</title>
+    <style>
+        body { font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; background-color: #f0f2f5; }
+        form { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        input { display: block; margin-bottom: 1rem; padding: 0.5rem; width: 250px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 0.7rem; width: 100%; border: none; background-color: #28a745; color: white; border-radius: 4px; cursor: pointer; }
+        h2 { text-align: center; }
+    </style>
+</head>
+<body>
+    <form action="/verify" method="POST">
+        <h2>Enter Your Code</h2>
+        <p>We sent a 6-digit code to your email.</p>
+        <input type="email" id="email" name="email" placeholder="Email" required>
+        <input type="text" name="token" placeholder="6-Digit Code" required pattern="\d{6}">
+        <button type="submit">Verify & Login</button>
+    </form>
+
+    <script>
+        // Pre-fill email from URL parameter
+        const urlParams = new URLSearchParams(window.location.search);
+        const email = urlParams.get('email');
+        if (email) {
+            document.getElementById('email').value = email;
+        }
+    </script>
+</body>
+</html>
