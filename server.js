@@ -55,18 +55,6 @@ async function startServer() {
             }
         }));
 
-        // DEBUGGING MIDDLEWARE: Log session state on every request
-        app.use((req, res, next) => {
-            console.log(`--> Request for: ${req.method} ${req.url}`)
-            if (req.session) {
-                console.log(`--> Session ID: ${req.session.id}`);
-                console.log(`--> Session Email: ${req.session.email}`);
-            } else {
-                console.log('--> Session object is UNDEFINED');
-            }
-            next();
-        });
-
         // 4. Setup Static Routes
         app.use(express.static(path.join(__dirname, 'views')));
 
@@ -208,6 +196,8 @@ async function startServer() {
         });
 
         app.post('/verify', async (req, res) => {
+            console.log('--- TRIGGERED /verify ROUTE ---');
+            console.log('Session at start of /verify:', req.session);
             try {
                 const { email, token } = req.body;
                 const normalizedEmail = email.toLowerCase().trim();
@@ -217,7 +207,7 @@ async function startServer() {
                     token: token.toString()
                 });
 
-                                if (storedToken && storedToken.expires > Date.now()) {
+                if (storedToken && storedToken.expires > Date.now()) {
                     req.session.email = normalizedEmail;
                     await loginTokensCollection.deleteOne({ _id: storedToken._id });
 
