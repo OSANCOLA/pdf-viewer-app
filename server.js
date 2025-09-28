@@ -41,7 +41,7 @@
     40         // 3. Setup Session Middleware (CRITICAL: Must be after DB connection and before routes)
     41         app.use(session({
     42             store: MongoStore.create({
-    43                 clientPromise: Promise.resolve(client),
+    43                                 mongoUrl: MONGODB_URI,
     44                 dbName: DB_NAME,
     45                 collectionName: 'sessions',
     46                 stringify: false,
