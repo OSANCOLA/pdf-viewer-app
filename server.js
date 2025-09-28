@@ -55,6 +55,18 @@ async function startServer() {
             }
         }));
 
+        // DEBUGGING MIDDLEWARE: Log session state on every request
+        app.use((req, res, next) => {
+            console.log(`--> Request for: ${req.method} ${req.url}`)
+            if (req.session) {
+                console.log(`--> Session ID: ${req.session.id}`);
+                console.log(`--> Session Email: ${req.session.email}`);
+            } else {
+                console.log('--> Session object is UNDEFINED');
+            }
+            next();
+        });
+
         // 4. Setup Static Routes
         app.use(express.static(path.join(__dirname, 'views')));
 
