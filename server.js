@@ -1,170 +1,192 @@
- 1 const express = require('express');
-     2 const session = require('express-session');
-     3 const MongoStore = require('connect-mongo');
-     4 const multer = require('multer');
-     5 const { GridFsStorage } = require('multer-gridfs-storage');
-     6 const path = require('path');
-     7 const { v4: uuidv4 } = require('uuid');
-     8 const sgMail = require('@sendgrid/mail');
-     9 const { MongoClient, GridFSBucket, ObjectId } = require('mongodb');
-    10 
-    11 // --- Config ---
-    12 const port = process.env.PORT || 3000;
-    13 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
-    14 
-    15 const MONGODB_URI = process.env.MONGODB_URI ||
-       'mongodb+srv://oscarcornejoeo_db_user:OYMnp4ZBmVao3pEg@cluster0.23zn79g.mongodb.net/pdf-viewer-db';
-    16 const DB_NAME = 'pdf-viewer-db';
-    17 
-    18 const app = express();
-    19 
-    20 // --- Main Server Function ---
-    21 async function startServer() {
-    22     let db, documentsCollection, permissionsCollection, loginTokensCollection, bucket;
-    23     let client;
-    24 
-    25     try {
-    26         // 1. Connect to Database
-    27         client = new MongoClient(MONGODB_URI);
-    28         await client.connect();
-    29         db = client.db(DB_NAME);
-    30         documentsCollection = db.collection('documents');
-    31         permissionsCollection = db.collection('permissions');
-    32         loginTokensCollection = db.collection('loginTokens');
-    33         bucket = new GridFSBucket(db, { bucketName: 'pdfs' });
-    34         console.log('Successfully connected to MongoDB Atlas and GridFS.');
-    35 
-    36         // 2. Setup Middleware
-    37         app.use(express.urlencoded({ extended: true }));
-    38         app.use(express.json());
-    39 
-    40         // 3. Setup Session Middleware (CRITICAL: Must be after DB connection and before routes)
-    41         app.use(session({
-    42             store: MongoStore.create({
-    43                                 mongoUrl: MONGODB_URI,
-    44                 dbName: DB_NAME,
-    45                 collectionName: 'sessions',
-    46                 stringify: false,
-    47             }),
-    48             secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
-    49             resave: false,
-    50             saveUninitialized: false,
-    51             cookie: {
-    52                 secure: process.env.NODE_ENV === 'production',
-    53                 maxAge: 1000 * 60 * 60 * 24,
-    54                 httpOnly: true
-    55             }
-    56         }));
-    57 
-    58         // 4. Setup Static Routes
-    59         app.use(express.static(path.join(__dirname, 'views')));
-    60 
-    61         // 5. Define All Application Routes
-    62 
-    63         // --- Auth Middleware ---
-    64         const requireLogin = (req, res, next) => {
-    65             if (req.session && req.session.email) {
-    66                 return next();
-    67             } else {
-    68                 return res.redirect('/login.html');
-    69             }
-    70         };
-    71 
-    72         // --- Admin Routes ---
-    73         app.get('/permissions', requireLogin, (req, res) => {
-    74             res.sendFile(path.join(__dirname, 'views', 'permissions.html'));
-    75         });
-    76 
-    77         app.get('/api/data', requireLogin, async (req, res) => {
-    78             try {
-    79                 const documents = await documentsCollection.find().toArray();
-    80                 const permissions = await permissionsCollection.find().toArray();
-    81                 res.json({ documents, permissions });
-    82             } catch (error) {
-    83                 console.error('Error fetching API data:', error);
-    84                 res.status(500).json({ error: 'Failed to fetch data' });
-    85             }
-    86         });
-    87 
-    88         const storage = new GridFsStorage({
-    89             url: MONGODB_URI,
-    90             options: { dbName: DB_NAME },
-    91             file: (req, file) => {
-    92                 return new Promise((resolve, reject) => {
-    93                     const docId = uuidv4();
-    94                     const filename = `${docId}.pdf`;
-    95                     const fileInfo = {
-    96                         filename: filename,
-    97                         bucketName: 'pdfs',
-    98                         metadata: {
-    99                             originalName: file.originalname,
-   100                             docId: docId
-   101                         }
-   102                     };
-   103                     resolve(fileInfo);
-   104                 });
-   105             }
-   106         });
-   107 
-   108         const upload = multer({
-   109             storage: storage,
-   110             limits: {
-   111                 fileSize: 50 * 1024 * 1024 // 50MB limit
-   112             },
-   113             fileFilter: (req, file, cb) => {
-   114                 if (file.mimetype === 'application/pdf') {
-   115                     cb(null, true);
-   116                 } else {
-   117                     cb(new Error('Only PDF files are allowed'));
-   118                 }
-   119             }
-   120         });
-   121 
-   122         app.post('/upload', requireLogin, upload.single('pdfFile'), async (req, res) => {
-   123             try {
-   124                 if (req.file) {
-   125                     const docInfo = {
-   126                         id: req.file.metadata.docId,
-   127                         originalName: req.file.metadata.originalName,
-   128                         storedName: req.file.filename,
-   129                         fileId: req.file.id // GridFS file ID
-   130                     };
-   131                     await documentsCollection.insertOne(docInfo);
-   132                     console.log('Document uploaded successfully:', docInfo);
-   133                 }
-   134                 res.redirect('/permissions.html');
-   135             } catch (error) {
-   136                 console.error('Error uploading file:', error);
-   137                 res.status(500).send('Error saving document information.');
-   138             }
-   139         });
-   140 
-   141         app.post('/grant-access', requireLogin, async (req, res) => {
-   142             try {
-   143                 const { email, documentId } = req.body;
-   144                 if (email && documentId) {
-   145                     const existingPermission = await permissionsCollection.findOne({
-   146                         email: email.toLowerCase(),
-   147                         documentId
-   148                     });
-   149                     if (!existingPermission) {
-   150                         await permissionsCollection.insertOne({
-   151                             email: email.toLowerCase(),
-   152                             documentId
-   153                         });
-   154                         console.log(`Access granted for ${email} to document ${documentId}`);
-   155                     }
-   156                 }
-   157                 res.redirect('/permissions.html');
-   158             } catch (error) {
-   159                 console.error('Error granting access:', error);
-   160                 res.status(500).send('Error granting access.');
-   161             }
-   162         });
+PARTE 1 de 7
+
+    1 const express = require('express');
+    2 const session = require('express-session');
+    3 const MongoStore = require('connect-mongo');
+    4 const multer = require('multer');
+    5 const { GridFsStorage } = require('multer-gridfs-storage');
+    6 const path = require('path');
+    7 const { v4: uuidv4 } = require('uuid');
+    8 const sgMail = require('@sendgrid/mail');
+    9 const { MongoClient, GridFSBucket, ObjectId } = require('mongodb');
+   10 
+   11 // --- Config ---
+   12 const port = process.env.PORT || 3000;
+   13 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
+   14 
+   15 const MONGODB_URI = process.env.MONGODB_URI ||
+      'mongodb+srv://oscarcornejoeo_db_user:OYMnp4ZBmVao3pEg@cluster0.23zn79g.mongodb.net/pdf-viewer-db';
+   16 const DB_NAME = 'pdf-viewer-db';
+   17 
+   18 const app = express();
 
   ---
 
-  PARTE 2
+  PARTE 2 de 7
+
+    1 // --- Main Server Function ---
+    2 async function startServer() {
+    3     let db, documentsCollection, permissionsCollection, loginTokensCollection, bucket;
+    4     let client;
+    5 
+    6     try {
+    7         // 1. Connect to Database
+    8         client = new MongoClient(MONGODB_URI);
+    9         await client.connect();
+   10         db = client.db(DB_NAME);
+   11         documentsCollection = db.collection('documents');
+   12         permissionsCollection = db.collection('permissions');
+   13         loginTokensCollection = db.collection('loginTokens');
+   14         bucket = new GridFSBucket(db, { bucketName: 'pdfs' });
+   15         console.log('Successfully connected to MongoDB Atlas and GridFS.');
+   16 
+   17         // 2. Setup Middleware
+   18         app.use(express.urlencoded({ extended: true }));
+   19         app.use(express.json());
+   20 
+   21         // 3. Setup Session Middleware
+   22         app.use(session({
+   23             store: MongoStore.create({
+   24                 mongoUrl: MONGODB_URI,
+   25                 dbName: DB_NAME,
+   26                 collectionName: 'sessions',
+   27                 stringify: false,
+   28             }),
+   29             secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
+   30             resave: false,
+   31             saveUninitialized: false,
+   32             cookie: {
+   33                 secure: process.env.NODE_ENV === 'production',
+   34                 maxAge: 1000 * 60 * 60 * 24,
+   35                 httpOnly: true
+   36             }
+   37         }));
+   38 
+   39         // DEBUGGING MIDDLEWARE: Log session state on every request
+   40         app.use((req, res, next) => {
+   41             console.log(`--> Request for: ${req.method} ${req.url}`);
+   42             if (req.session) {
+   43                 console.log(`--> Session ID: ${req.session.id}`);
+   44                 console.log(`--> Session Email: ${req.session.email}`);
+   45             } else {
+   46                 console.log('--> Session object is UNDEFINED');
+   47             }
+   48             next();
+   49         });
+   50 
+   51         // 4. Setup Static Routes
+   52         app.use(express.static(path.join(__dirname, 'views')));
+
+  ---
+
+  PARTE 3 de 7
+
+     1         // 5. Define All Application Routes
+     2 
+     3         // --- Auth Middleware ---
+     4         const requireLogin = (req, res, next) => {
+     5             if (req.session && req.session.email) {
+     6                 return next();
+     7             } else {
+     8                 return res.redirect('/login.html');
+     9             }
+    10         };
+    11 
+    12         // --- Admin Routes ---
+    13         app.get('/permissions', requireLogin, (req, res) => {
+    14             res.sendFile(path.join(__dirname, 'views', 'permissions.html'));
+    15         });
+    16 
+    17         app.get('/api/data', requireLogin, async (req, res) => {
+    18             try {
+    19                 const documents = await documentsCollection.find().toArray();
+    20                 const permissions = await permissionsCollection.find().toArray();
+    21                 res.json({ documents, permissions });
+    22             } catch (error) {
+    23                 console.error('Error fetching API data:', error);
+    24                 res.status(500).json({ error: 'Failed to fetch data' });
+    25             }
+    26         });
+    27 
+    28         const storage = new GridFsStorage({
+    29             url: MONGODB_URI,
+    30             options: { dbName: DB_NAME },
+    31             file: (req, file) => {
+    32                 return new Promise((resolve, reject) => {
+    33                     const docId = uuidv4();
+    34                     const filename = `${docId}.pdf`;
+    35                     const fileInfo = {
+    36                         filename: filename,
+    37                         bucketName: 'pdfs',
+    38                         metadata: {
+    39                             originalName: file.originalname,
+    40                             docId: docId
+    41                         }
+    42                     };
+    43                     resolve(fileInfo);
+    44                 });
+    45             }
+    46         });
+    47 
+    48         const upload = multer({
+    49             storage: storage,
+    50             limits: {
+    51                 fileSize: 50 * 1024 * 1024 // 50MB limit
+    52             },
+    53             fileFilter: (req, file, cb) => {
+    54                 if (file.mimetype === 'application/pdf') {
+    55                     cb(null, true);
+    56                 } else {
+    57                     cb(new Error('Only PDF files are allowed'));
+    58                 }
+    59             }
+    60         });
+    61 
+    62         app.post('/upload', requireLogin, upload.single('pdfFile'), async (req, res) => {
+    63             try {
+    64                 if (req.file) {
+    65                     const docInfo = {
+    66                         id: req.file.metadata.docId,
+    67                         originalName: req.file.metadata.originalName,
+    68                         storedName: req.file.filename,
+    69                         fileId: req.file.id // GridFS file ID
+    70                     };
+    71                     await documentsCollection.insertOne(docInfo);
+    72                     console.log('Document uploaded successfully:', docInfo);
+    73                 }
+    74                 res.redirect('/permissions.html');
+    75             } catch (error) {
+    76                 console.error('Error uploading file:', error);
+    77                 res.status(500).send('Error saving document information.');
+    78             }
+    79         });
+    80 
+    81         app.post('/grant-access', requireLogin, async (req, res) => {
+    82             try {
+    83                 const { email, documentId } = req.body;
+    84                 if (email && documentId) {
+    85                     const existingPermission = await permissionsCollection.findOne({
+    86                         email: email.toLowerCase(),
+    87                         documentId
+    88                     });
+    89                     if (!existingPermission) {
+    90                         await permissionsCollection.insertOne({
+    91                             email: email.toLowerCase(),
+    92                             documentId
+    93                         });
+    94                         console.log(`Access granted for ${email} to document ${documentId}`);
+    95                     }
+    96                 }
+    97                 res.redirect('/permissions.html');
+    98             } catch (error) {
+    99                 console.error('Error granting access:', error);
+   100                 res.status(500).send('Error granting access.');
+   101             }
+   102         });
+
+  ---
+
+  PARTE 4 de 7
 
     1         // --- Auth Routes ---
     2         app.post('/request-login', async (req, res) => {
@@ -232,39 +254,43 @@
    62         app.get('/logout', (req, res) => {
    63             req.session.destroy(() => res.redirect('/login.html'));
    64         });
-   65 
-   66         // --- User Routes ---
-   67         app.get('/dashboard', requireLogin, (req, res) => {
-   68             res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
-   69         });
-   70 
-   71         app.get('/api/dashboard', requireLogin, async (req, res) => {
-   72             try {
-   73                 const userEmail = req.session.email.toLowerCase();
-   74                 const userPermissions = await permissionsCollection.find({ email: userEmail }).toArray
-      ();
-   75                 const documentIds = userPermissions.map(p => p.documentId);
-   76 
-   77                 if (documentIds.length === 0) {
-   78                     return res.json([]);
-   79                 }
-   80 
-   81                 const userDocs = await documentsCollection.find({ id: { $in: documentIds } }).toArray
-      ();
-   82                 res.json(userDocs);
-   83             } catch (error) {
-   84                 console.error('Error in /api/dashboard:', error);
-   85                 res.status(500).json({ error: 'Failed to load documents' });
-   86             }
-   87         });
-   88 
-   89         app.get('/viewer.html', requireLogin, (req, res) => {
-   90             res.sendFile(path.join(__dirname, 'views', 'viewer.html'));
-   91         });
 
   ---
 
-  PARTE 3
+  PARTE 5 de 7
+
+    1         // --- User Routes ---
+    2         app.get('/dashboard', requireLogin, (req, res) => {
+    3             res.sendFile(path.join(__dirname, 'views', 'dashboard.html'));
+    4         });
+    5 
+    6         app.get('/api/dashboard', requireLogin, async (req, res) => {
+    7             try {
+    8                 const userEmail = req.session.email.toLowerCase();
+    9                 const userPermissions = await permissionsCollection.find({ email: userEmail }).toArray
+      ();
+   10                 const documentIds = userPermissions.map(p => p.documentId);
+   11 
+   12                 if (documentIds.length === 0) {
+   13                     return res.json([]);
+   14                 }
+   15 
+   16                 const userDocs = await documentsCollection.find({ id: { $in: documentIds } }).toArray
+      ();
+   17                 res.json(userDocs);
+   18             } catch (error) {
+   19                 console.error('Error in /api/dashboard:', error);
+   20                 res.status(500).json({ error: 'Failed to load documents' });
+   21             }
+   22         });
+   23 
+   24         app.get('/viewer.html', requireLogin, (req, res) => {
+   25             res.sendFile(path.join(__dirname, 'views', 'viewer.html'));
+   26         });
+
+  ---
+
+  PARTE 6 de 7
 
     1         app.get('/pdf-data/:docId', requireLogin, async (req, res) => {
     2             try {
@@ -307,36 +333,40 @@
    39                 res.status(500).send('Error fetching document.');
    40             }
    41         });
-   42 
-   43         // --- Root & Error Handling ---\
-   44         app.get('/', (req, res) => res.redirect('/login.html'));
-   45 
-   46         app.use((err, req, res, next) => {
-   47             console.error('Unhandled error:', err);
-   48             res.status(500).send('Something went wrong!');
-   49         });
-   50 
-   51         app.use((req, res) => {
-   52             res.status(404).send('Page not found');
-   53         });
-   54 
-   55         // 6. Start Listening
-   56         app.listen(port, () => {
-   57             console.log(`Server running on port ${port}`);
-   58             console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-   59         });
-   60 
-   61     } catch (error) {
-   62         console.error('Failed to start server:', error);
-   63         process.exit(1);
-   64     }
-   65 }
-   66 
-   67 // Graceful shutdown
-   68 process.on('SIGTERM', async () => {
-   69     console.log('SIGTERM received, shutting down gracefully');
-   70     process.exit(0);
-   71 });
-   72 
-   73 // --- Start the application ---
-   74 startServer();
+
+  ---
+
+  PARTE 7 de 7
+
+    1         // --- Root & Error Handling ---\
+    2         app.get('/', (req, res) => res.redirect('/login.html'));
+    3 
+    4         app.use((err, req, res, next) => {
+    5             console.error('Unhandled error:', err);
+    6             res.status(500).send('Something went wrong!');
+    7         });
+    8 
+    9         app.use((req, res) => {
+   10             res.status(404).send('Page not found');
+   11         });
+   12 
+   13         // 6. Start Listening
+   14         app.listen(port, () => {
+   15             console.log(`Server running on port ${port}`);
+   16             console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+   17         });
+   18 
+   19     } catch (error) {
+   20         console.error('Failed to start server:', error);
+   21         process.exit(1);
+   22     }
+   23 }
+   24 
+   25 // Graceful shutdown
+   26 process.on('SIGTERM', async () => {
+   27     console.log('SIGTERM received, shutting down gracefully');
+   28     process.exit(0);
+   29 });
+   30 
+   31 // --- Start the application ---
+   32 startServer();
