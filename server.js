@@ -217,11 +217,18 @@ async function startServer() {
                     token: token.toString()
                 });
 
-                if (storedToken && storedToken.expires > Date.now()) {
+                                if (storedToken && storedToken.expires > Date.now()) {
                     req.session.email = normalizedEmail;
                     await loginTokensCollection.deleteOne({ _id: storedToken._id });
-                    console.log('User verified:', normalizedEmail);
-                    res.redirect('/dashboard.html');
+
+                    req.session.save((err) => {
+                        if (err) {
+                            console.error('Error saving session:', err);
+                            return res.status(500).send('Error saving session.');
+                        }
+                        console.log('User verified and session saved:', normalizedEmail);
+                        res.redirect('/dashboard.html');
+                    });
                 } else {
                     if (storedToken) {
                         await loginTokensCollection.deleteOne({ _id: storedToken._id });
