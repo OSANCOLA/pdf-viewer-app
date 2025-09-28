@@ -19,11 +19,6 @@ PARTE 1 de 7
    16 const DB_NAME = 'pdf-viewer-db';
    17 
    18 const app = express();
-
-  ---
-
-  PARTE 2 de 7
-
     1 // --- Main Server Function ---
     2 async function startServer() {
     3     let db, documentsCollection, permissionsCollection, loginTokensCollection, bucket;
@@ -76,11 +71,6 @@ PARTE 1 de 7
    50 
    51         // 4. Setup Static Routes
    52         app.use(express.static(path.join(__dirname, 'views')));
-
-  ---
-
-  PARTE 3 de 7
-
      1         // 5. Define All Application Routes
      2 
      3         // --- Auth Middleware ---
@@ -183,11 +173,6 @@ PARTE 1 de 7
    100                 res.status(500).send('Error granting access.');
    101             }
    102         });
-
-  ---
-
-  PARTE 4 de 7
-
     1         // --- Auth Routes ---
     2         app.post('/request-login', async (req, res) => {
     3             const { email } = req.body;
@@ -287,11 +272,6 @@ PARTE 1 de 7
    24         app.get('/viewer.html', requireLogin, (req, res) => {
    25             res.sendFile(path.join(__dirname, 'views', 'viewer.html'));
    26         });
-
-  ---
-
-  PARTE 6 de 7
-
     1         app.get('/pdf-data/:docId', requireLogin, async (req, res) => {
     2             try {
     3                 const { docId } = req.params;
@@ -333,11 +313,6 @@ PARTE 1 de 7
    39                 res.status(500).send('Error fetching document.');
    40             }
    41         });
-
-  ---
-
-  PARTE 7 de 7
-
     1         // --- Root & Error Handling ---\
     2         app.get('/', (req, res) => res.redirect('/login.html'));
     3 
