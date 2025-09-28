@@ -1,33 +1,35 @@
 const express = require('express');
 const session = require('express-session');
-const FileStore = require('session-file-store')(session);
+const MongoStore = require('connect-mongo');
 const multer = require('multer');
+const { GridFsStorage } = require('multer-gridfs-storage');
 const path = require('path');
-const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const sgMail = require('@sendgrid/mail');
-const { MongoClient } = require('mongodb');
+const { MongoClient, GridFSBucket, ObjectId } = require('mongodb');
 
 // --- Config ---
 const port = process.env.PORT || 3000;
 sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // IMPORTANT: Store this as an environment variable in Render
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://oscarcornejoeo_db_user:OYMnp4ZBmVao3pEg@cluster0.23zn79g.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0';
+const MONGODB_URI = process.env.MONGODB_URI || 'mongodb+srv://oscarcornejoeo_db_user:OYMnp4ZBmVao3pEg@cluster0.23zn79g.mongodb.net/pdf-viewer-db';
 const DB_NAME = 'pdf-viewer-db';
 
 // --- Database Connection ---
-let db, documentsCollection, permissionsCollection, loginTokensCollection;
+let db, documentsCollection, permissionsCollection, loginTokensCollection, bucket;
+let client; // Define client in a broader scope
 
 async function connectDB() {
     try {
-        const client = new MongoClient(MONGODB_URI);
+        client = new MongoClient(MONGODB_URI);
         await client.connect();
         db = client.db(DB_NAME);
         documentsCollection = db.collection('documents');
         permissionsCollection = db.collection('permissions');
         loginTokensCollection = db.collection('loginTokens');
-        console.log('Successfully connected to MongoDB Atlas.');
+        bucket = new GridFSBucket(db, { bucketName: 'pdfs' });
+        console.log('Successfully connected to MongoDB Atlas and GridFS.');
     } catch (error) {
         console.error('Failed to connect to MongoDB Atlas.', error);
         process.exit(1); // Exit if we can't connect to the DB
@@ -39,15 +41,28 @@ const app = express();
 // --- Middleware ---
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-app.use(session({
-    store: new FileStore({ logFn: function() {} }), // No logging
-    secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
-    resave: false,
-    saveUninitialized: true,
-    cookie: { secure: process.env.NODE_ENV === 'production', maxAge: 1000 * 60 * 60 * 24 } // 24 hour session
-}));
+
+// Initialize session after DB connection
+async function initializeSession() {
+    app.use(session({
+        store: MongoStore.create({
+            clientPromise: Promise.resolve(client),
+            dbName: DB_NAME,
+            collectionName: 'sessions',
+            stringify: false,
+        }),
+        secret: process.env.SESSION_SECRET || 'a-much-better-secret-key-for-dev',
+        resave: false,
+        saveUninitialized: false,
+        cookie: {
+            secure: process.env.NODE_ENV === 'production',
+            maxAge: 1000 * 60 * 60 * 24,
+            httpOnly: true
+        }
+    }));
+}
+
 app.use(express.static(path.join(__dirname, 'views')));
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // --- Auth Middleware ---
 const requireLogin = (req, res, next) => {
@@ -74,30 +89,51 @@ app.get('/api/data', requireLogin, async (req, res) => {
     }
 });
 
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        const uploadPath = path.join(__dirname, 'uploads');
-        fs.mkdirSync(uploadPath, { recursive: true });
-        cb(null, uploadPath);
-    },
-    filename: (req, file, cb) => {
-        const storedName = `${uuidv4()}.pdf`;
-        const docInfo = {
-            id: storedName.replace('.pdf', ''),
-            originalName: file.originalname,
-            storedName: storedName
-        };
-        // The database insertion will be handled in the route handler
-        req.docInfo = docInfo;
-        cb(null, storedName);
+const storage = new GridFsStorage({
+    url: MONGODB_URI,
+    options: { dbName: DB_NAME },
+    file: (req, file) => {
+        return new Promise((resolve, reject) => {
+            const docId = uuidv4();
+            const filename = `${docId}.pdf`;
+            const fileInfo = {
+                filename: filename,
+                bucketName: 'pdfs',
+                metadata: {
+                    originalName: file.originalname,
+                    docId: docId
+                }
+            };
+            resolve(fileInfo);
+        });
     }
 });
-const upload = multer({ storage: storage });
+
+const upload = multer({
+    storage: storage,
+    limits: {
+        fileSize: 50 * 1024 * 1024 // 50MB limit
+    },
+    fileFilter: (req, file, cb) => {
+        if (file.mimetype === 'application/pdf') {
+            cb(null, true);
+        } else {
+            cb(new Error('Only PDF files are allowed'));
+        }
+    }
+});
 
 app.post('/upload', requireLogin, upload.single('pdfFile'), async (req, res) => {
     try {
-        if (req.docInfo) {
-            await documentsCollection.insertOne(req.docInfo);
+        if (req.file) {
+            const docInfo = {
+                id: req.file.metadata.docId,
+                originalName: req.file.metadata.originalName,
+                storedName: req.file.filename,
+                fileId: req.file.id // GridFS file ID
+            };
+            await documentsCollection.insertOne(docInfo);
+            console.log('Document uploaded successfully:', docInfo);
         }
         res.redirect('/permissions.html');
     } catch (error) {
@@ -110,9 +146,15 @@ app.post('/grant-access', requireLogin, async (req, res) => {
     try {
         const { email, documentId } = req.body;
         if (email && documentId) {
-            const existingPermission = await permissionsCollection.findOne({ email, documentId });
+            const existingPermission = await permissionsCollection.findOne({
+                email: email.toLowerCase(),
+                documentId
+            });
             if (!existingPermission) {
-                await permissionsCollection.insertOne({ email, documentId });
+                await permissionsCollection.insertOne({
+                    email: email.toLowerCase(),
+                    documentId
+                });
                 console.log(`Access granted for ${email} to document ${documentId}`);
             }
         }
@@ -128,42 +170,53 @@ app.post('/request-login', async (req, res) => {
     const { email } = req.body;
     if (!email) return res.status(400).send('Email is required.');
 
+    const normalizedEmail = email.toLowerCase().trim();
     const token = Math.floor(100000 + Math.random() * 900000).toString();
-    const newToken = { email, token, expires: Date.now() + 300000 }; // 5-min expiry
+    const newToken = {
+        email: normalizedEmail,
+        token,
+        expires: Date.now() + 300000
+    }; // 5-min expiry
 
     try {
         // Remove old tokens for the same email and insert the new one
-        await loginTokensCollection.deleteMany({ email });
+        await loginTokensCollection.deleteMany({ email: normalizedEmail });
         await loginTokensCollection.insertOne(newToken);
 
         const msg = {
-            to: email,
-            from: 'oscarcornejo.eo@gmail.com', // This should ideally be a verified sender in SendGrid
+            to: normalizedEmail,
+            from: 'oscarcornejo.eo@gmail.com',
             subject: 'Your PDF Viewer Login Code',
             text: `Your login code is: ${token}`,
+            html: `<p>Your login code is: <strong>${token}</strong></p><p>This code will expire in 5 minutes.</p>`
         };
 
         await sgMail.send(msg);
-        console.log('Login email sent to ' + email);
-        res.redirect(`/verify.html?email=${encodeURIComponent(email)}`);
+        console.log('Login email sent to ' + normalizedEmail);
+        res.redirect(`/verify.html?email=${encodeURIComponent(normalizedEmail)}`);
     } catch (error) {
         console.error('Error sending email:', error.response ? error.response.body : error);
-        res.status(500).send('Error sending login code.');
+        res.status(500).send('Error sending login code. Please check if the email is valid.');
     }
 });
 
 app.post('/verify', async (req, res) => {
     try {
         const { email, token } = req.body;
-        const storedToken = await loginTokensCollection.findOne({ email, token });
+        const normalizedEmail = email.toLowerCase().trim();
+
+        const storedToken = await loginTokensCollection.findOne({
+            email: normalizedEmail,
+            token: token.toString()
+        });
 
         if (storedToken && storedToken.expires > Date.now()) {
-            req.session.email = email;
+            req.session.email = normalizedEmail;
             await loginTokensCollection.deleteOne({ _id: storedToken._id });
-            console.log('User verified:', email);
+            console.log('User verified:', normalizedEmail);
             res.redirect('/dashboard.html');
         } else {
-            if (storedToken) { // Token expired
+            if (storedToken) {
                 await loginTokensCollection.deleteOne({ _id: storedToken._id });
             }
             res.status(400).send('Invalid or expired token. <a href="/login.html">Try again</a>');
@@ -186,9 +239,25 @@ app.get('/dashboard', requireLogin, (req, res) => {
 app.get('/api/dashboard', requireLogin, async (req, res) => {
     try {
         const userEmail = req.session.email.toLowerCase();
-        const userPermissions = await permissionsCollection.find({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') } }).toArray();
+        console.log(`Fetching dashboard data for user: ${userEmail}`);
+
+        const userPermissions = await permissionsCollection.find({
+            email: userEmail
+        }).toArray();
+        console.log('Found permissions:', userPermissions);
+
         const documentIds = userPermissions.map(p => p.documentId);
-        const userDocs = await documentsCollection.find({ id: { $in: documentIds } }).toArray();
+        console.log('Document IDs to fetch:', documentIds);
+
+        if (documentIds.length === 0) {
+            return res.json([]);
+        }
+
+        const userDocs = await documentsCollection.find({
+            id: { $in: documentIds }
+        }).toArray();
+        console.log('Found documents:', userDocs);
+
         res.json(userDocs);
     } catch (error) {
         console.error('Error in /api/dashboard:', error);
@@ -203,35 +272,100 @@ app.get('/viewer.html', requireLogin, (req, res) => {
 app.get('/pdf-data/:docId', requireLogin, async (req, res) => {
     try {
         const { docId } = req.params;
-        const userEmail = req.session.email;
+        const userEmail = req.session.email.toLowerCase();
 
-        const hasPermission = await permissionsCollection.findOne({ email: { $regex: new RegExp(`^${userEmail}$`, 'i') }, documentId: docId });
-        if (!hasPermission) return res.status(403).send('Access Denied.');
+        console.log(`PDF access request - User: ${userEmail}, Document: ${docId}`);
 
-        const doc = await documentsCollection.findOne({ id: docId });
-        if (!doc) return res.status(404).send('Document not found.');
+        // Check permissions
+        const hasPermission = await permissionsCollection.findOne({
+            email: userEmail,
+            documentId: docId
+        });
 
-        const pdfPath = path.join(__dirname, 'uploads', doc.storedName);
-        if (fs.existsSync(pdfPath)) {
-            res.sendFile(pdfPath);
-        } else {
-            res.status(404).send('Document file is missing.');
+        if (!hasPermission) {
+            console.log('Access denied - no permission found');
+            return res.status(403).send('Access Denied.');
         }
+
+        // Find document metadata
+        const doc = await documentsCollection.findOne({ id: docId });
+        if (!doc || !doc.fileId) {
+            console.log('Document not found in database or fileId is missing');
+            return res.status(404).send('Document not found.');
+        }
+
+        // Find the file in GridFS
+        const files = await bucket.find({ _id: new ObjectId(doc.fileId) }).toArray();
+        if (!files || files.length === 0) {
+            console.log('PDF file not found in GridFS');
+            return res.status(404).send('Document file is missing.');
+        }
+
+        console.log('PDF file found, streaming...');
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Content-Disposition', 'inline');
+        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+
+        const downloadStream = bucket.openDownloadStream(new ObjectId(doc.fileId));
+        downloadStream.pipe(res);
+
+        downloadStream.on('error', (error) => {
+            console.error('Error streaming PDF from GridFS:', error);
+            res.status(500).send('Error streaming document.');
+        });
+
     } catch (error) {
         console.error('Error fetching PDF data:', error);
         res.status(500).send('Error fetching document.');
     }
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'ok',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
 // --- Root ---
 app.get('/', (req, res) => res.redirect('/login.html'));
 
+// Error handling middleware
+app.use((err, req, res, next) => {
+    console.error('Unhandled error:', err);
+    res.status(500).send('Something went wrong!');
+});
+
+// 404 handler
+app.use((req, res) => {
+    res.status(404).send('Page not found');
+});
+
 // --- Server ---
 async function startServer() {
-    await connectDB();
-    app.listen(port, () => {
-        console.log(`Server running on port ${port}`);
-    });
+    try {
+        await connectDB();
+        await initializeSession();
+
+        app.listen(port, () => {
+            console.log(`Server running on port ${port}`);
+            console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+        });
+    } catch (error) {
+        console.error('Failed to start server:', error);
+        process.exit(1);
+    }
 }
+
+// Graceful shutdown
+process.on('SIGTERM', async () => {
+    console.log('SIGTERM received, shutting down gracefully');
+    if (client) {
+        await client.close();
+    }
+    process.exit(0);
+});
 
 startServer();
