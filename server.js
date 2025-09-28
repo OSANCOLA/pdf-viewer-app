@@ -51,7 +51,8 @@ async function startServer() {
             cookie: {
                 secure: process.env.NODE_ENV === 'production',
                 maxAge: 1000 * 60 * 60 * 24,
-                httpOnly: true
+                httpOnly: true,
+                sameSite: 'lax' // Explicitly set SameSite policy
             }
         }));
 
@@ -196,8 +197,6 @@ async function startServer() {
         });
 
         app.post('/verify', async (req, res) => {
-            console.log('--- TRIGGERED /verify ROUTE ---');
-            console.log('Session at start of /verify:', req.session);
             try {
                 const { email, token } = req.body;
                 const normalizedEmail = email.toLowerCase().trim();
